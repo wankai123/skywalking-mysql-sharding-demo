@@ -1,0 +1,162 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: '2.1'
+
+services:
+  sharding-proxy:
+    image: apache/shardingsphere-proxy:5.1.2
+    volumes:
+      - ./download-mysql.sh:/opt/shardingsphere-proxy/download-mysql.sh
+      - ./shardingsphere-proxy/conf:/opt/shardingsphere-proxy/conf
+    networks:
+      - e2e
+    entrypoint: ['sh', '-c', '/opt/shardingsphere-proxy/download-mysql.sh /opt/shardingsphere-proxy/ext-lib && /opt/shardingsphere-proxy/bin/start.sh 3307 && tail -f /opt/shardingsphere-proxy/logs/stdout.log']
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/3307"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+    ports:
+      - 13307:3307
+    depends_on:
+      mysql-1:
+        condition: service_healthy
+      mysql-2:
+        condition: service_healthy
+
+  mysql-1: &mysql
+    image: mysql/mysql-server:8.0.13
+    networks:
+      - e2e
+    ports:
+      - 3306:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: "root@1234"
+      MYSQL_DATABASE: "swtest"
+      MYSQL_ROOT_HOST: "%"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/3306"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  mysql-2:
+    image: mysql/mysql-server:8.0.13
+    networks:
+      - e2e
+    ports:
+      - 3307:3306
+    environment:
+      MYSQL_ROOT_PASSWORD: "root@1234"
+      MYSQL_DATABASE: "swtest"
+      MYSQL_ROOT_HOST: "%"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/3306"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+
+  oap:
+    image: ghcr.io/apache/skywalking/oap:091b7810c1d48e4432a319bc955479fd09e23307
+    expose:
+      - 11800
+      - 12800
+      - 10051
+      - 5005
+    networks:
+      - e2e
+    volumes:
+      - ./download-mysql.sh:/download-mysql.sh
+    environment:
+      SW_STORAGE: mysql-sharding
+      SW_JDBC_URL: jdbc:mysql://sharding-proxy:3307/swtest
+      SW_JDBC_SHARDING_DATA_SOURCES: ds_0,ds_1
+      SW_CORE_METRICS_DATA_TTL: 2
+      SW_CORE_RECORD_DATA_TTL: 2
+      SW_OTEL_RECEIVER_ENABLED_OTEL_RULES: ""
+      SW_METER_ANALYZER_ACTIVE_FILES: ""
+      SW_LOG_LAL_FILES: ""
+      SW_ENVOY_METRIC: "-"
+    ports:
+      - 12800
+    entrypoint: ['sh', '-c', '/download-mysql.sh /skywalking/oap-libs && /skywalking/docker-entrypoint.sh']
+    networks:
+      - e2e
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/11800"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+    depends_on:
+      sharding-proxy:
+        condition: service_healthy
+
+  provider:
+    image: "ghcr.io/apache/skywalking-java/skywalking-java:3f88d735ba2bfd1196aff946502447d4b14450c8-java8"
+    volumes:
+      - ./lib/e2e-service-provider-2.0.0.jar:/services_provider.jar
+    command: [ "java", "-jar", "/services_provider.jar" ]
+    networks:
+      - e2e
+    ports:
+      - 9090:9090
+    environment:
+      SW_AGENT_COLLECTOR_BACKEND_SERVICES: oap:11800
+      SW_LOGGING_OUTPUT: CONSOLE
+      SW_AGENT_NAME: e2e-service-provider
+      SW_AGENT_INSTANCE_NAME: provider1
+      SW_AGENT_COLLECTOR_GET_PROFILE_TASK_INTERVAL: 1
+      SW_AGENT_COLLECTOR_GET_AGENT_DYNAMIC_CONFIG_INTERVAL: 1
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/9090"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+    depends_on:
+      oap:
+        condition: service_healthy
+
+  consumer:
+    image: "ghcr.io/apache/skywalking-java/skywalking-java:3f88d735ba2bfd1196aff946502447d4b14450c8-java8"
+    volumes:
+      - ./lib/e2e-service-consumer-2.0.0.jar:/services_consumer.jar
+    command: ["java", "-jar", "/services_consumer.jar"]
+    networks:
+      - e2e
+    ports:
+      - 9092:9092
+    environment:
+      SW_AGENT_COLLECTOR_BACKEND_SERVICES: oap:11800
+      SW_LOGGING_OUTPUT: CONSOLE
+      PROVIDER_URL: http://provider:9090
+      SW_AGENT_NAME: e2e-service-consumer
+      SW_AGENT_INSTANCE_NAME: consumer1
+      SW_AGENT_COLLECTOR_GET_PROFILE_TASK_INTERVAL: 1
+      SW_AGENT_COLLECTOR_GET_AGENT_DYNAMIC_CONFIG_INTERVAL: 1
+    healthcheck:
+      test: ["CMD", "bash", "-c", "cat < /dev/null > /dev/tcp/127.0.0.1/9092"]
+      interval: 5s
+      timeout: 60s
+      retries: 120
+    depends_on:
+      oap:
+        condition: service_healthy
+      provider:
+        condition: service_healthy
+
+
+networks:
+  e2e:
